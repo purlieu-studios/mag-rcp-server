@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir C:programmingrag-mcp-server)",
+      "Bash(tree:*)",
+      "WebSearch",
+      "WebFetch(domain:pypi.org)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

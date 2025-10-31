@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "mag-csharp": {
+      "command": "python",
+      "args": ["-m", "mag.server"],
+      "env": {
+        "MAG_OLLAMA_HOST": "http://localhost:11434",
+        "MAG_CODEBASE_ROOT": "/path/to/your/csharp/project",
+        "MAG_CHROMA_PERSIST_DIR": "./data/chroma",
+        "MAG_EMBEDDING_MODEL": "nomic-embed-text",
+        "MAG_LLM_MODEL": "codestral",
+        "MAG_CHUNK_SIZE_TOKENS": "512",
+        "MAG_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
