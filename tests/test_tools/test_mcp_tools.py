@@ -46,7 +46,7 @@ class TestSearchCode:
                     "hierarchy": "NS.TestClass",
                 }
             ],
-            "distances": [0.1],  # 0.9 relevance
+            "distances": [0.9],  # Similarity score (Qdrant query_points returns scores directly)
         }
 
         results = search_code("test class")
@@ -110,13 +110,13 @@ class TestSearchCode:
                 {"file": "f1", "lines": [1, 2], "type": "class", "name": "C1", "hierarchy": "C1"},
                 {"file": "f2", "lines": [1, 2], "type": "class", "name": "C2", "hierarchy": "C2"},
             ],
-            "distances": [0.2, 0.5],  # 0.8 and 0.5 relevance
+            "distances": [0.8, 0.5],  # Similarity scores: 0.8 and 0.5
         }
 
         # Default threshold is 0.7
         results = search_code("query")
 
-        # Should only include first result (0.8 relevance)
+        # Should only include first result (0.8 similarity, above 0.7 threshold)
         assert len(results) == 1
 
 

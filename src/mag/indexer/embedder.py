@@ -43,6 +43,7 @@ class CodebaseEmbedder:
     def index_codebase(
         self,
         progress_callback: Callable[[str, int, int], None] | None = None,
+        incremental: bool = True,
     ) -> dict[str, int]:
         """
         Index the entire codebase.
@@ -50,9 +51,11 @@ class CodebaseEmbedder:
         Args:
             progress_callback: Optional callback function(message, current, total)
                              for progress reporting.
+            incremental: If True, only re-index files that have changed since last indexing.
+                        If False, re-index all files.
 
         Returns:
-            Dictionary with indexing statistics.
+            Dictionary with indexing statistics (includes 'files_skipped' for incremental).
         """
         logger.info("Starting codebase indexing...")
 
@@ -62,12 +65,30 @@ class CodebaseEmbedder:
 
         if total_files == 0:
             logger.warning("No files found to index")
-            return {"files_processed": 0, "chunks_created": 0, "errors": 0}
+            return {"files_processed": 0, "chunks_created": 0, "errors": 0, "files_skipped": 0}
 
-        logger.info(f"Found {total_files} files to index")
+        # Filter files for incremental indexing
+        if incremental:
+            files_to_index = []
+            files_skipped = 0
+            for file_path in files:
+                if self._needs_reindexing(file_path):
+                    files_to_index.append(file_path)
+                else:
+                    files_skipped += 1
+                    logger.debug(f"Skipping unchanged file: {file_path}")
+            logger.info(f"Found {total_files} files total, {len(files_to_index)} need indexing, {files_skipped} unchanged")
+        else:
+            files_to_index = files
+            files_skipped = 0
+            logger.info(f"Found {total_files} files to index (full reindex)")
+
+        if len(files_to_index) == 0:
+            logger.info("No files need indexing")
+            return {"files_processed": 0, "chunks_created": 0, "errors": 0, "files_skipped": files_skipped}
 
         if progress_callback:
-            progress_callback("Discovering files", 0, total_files)
+            progress_callback("Discovering files", 0, len(files_to_index))
 
         # Process files in parallel
         total_chunks = 0
@@ -75,7 +96,7 @@ class CodebaseEmbedder:
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_file = {
-                executor.submit(self._index_file, file_path): file_path for file_path in files
+                executor.submit(self._index_file, file_path): file_path for file_path in files_to_index
             }
 
             for i, future in enumerate(as_completed(future_to_file), 1):
@@ -89,7 +110,7 @@ class CodebaseEmbedder:
                         progress_callback(
                             f"Indexed {file_path.name}",
                             i,
-                            total_files,
+                            len(files_to_index),
                         )
 
                     logger.info(f"Indexed {file_path}: {chunks_count} chunks")
@@ -102,17 +123,18 @@ class CodebaseEmbedder:
                         progress_callback(
                             f"Error indexing {file_path.name}",
                             i,
-                            total_files,
+                            len(files_to_index),
                         )
 
         logger.info(
-            f"Indexing complete: {total_files} files, {total_chunks} chunks, {total_errors} errors"
+            f"Indexing complete: {len(files_to_index)} files processed, {total_chunks} chunks, {total_errors} errors, {files_skipped} skipped"
         )
 
         return {
-            "files_processed": total_files,
+            "files_processed": len(files_to_index),
             "chunks_created": total_chunks,
             "errors": total_errors,
+            "files_skipped": files_skipped,
         }
 
     def _index_file(self, file_path: Path) -> int:
@@ -146,6 +168,9 @@ class CodebaseEmbedder:
         metadatas = []
         ids = []
 
+        # Get file modification time for incremental indexing
+        file_mtime = file_path.stat().st_mtime
+
         for chunk in chunks:
             # Generate embedding
             embedding = self.ollama_client.embed(chunk.content)
@@ -159,6 +184,8 @@ class CodebaseEmbedder:
                 k: (str(v) if isinstance(v, Path) else v)
                 for k, v in chunk.metadata.items()
             }
+            # Add modification time for incremental indexing
+            metadata["file_mtime"] = file_mtime
             metadatas.append(metadata)
 
             # Generate unique ID
@@ -223,3 +250,52 @@ class CodebaseEmbedder:
 
         # Return first 16 characters for readability
         return f"chunk_{hash_digest[:16]}"
+
+    def _needs_reindexing(self, file_path: Path) -> bool:
+        """
+        Check if a file needs reindexing based on modification time.
+
+        Args:
+            file_path: Path to the file to check.
+
+        Returns:
+            True if file needs reindexing, False otherwise.
+        """
+        try:
+            # Get current file modification time
+            current_mtime = file_path.stat().st_mtime
+
+            # Query vector store for existing chunks from this file
+            # Use the collection.get() compatibility method
+            results = self.vector_store.collection.get(
+                where={"file": str(file_path)},
+                limit=1,
+            )
+
+            # If no chunks exist for this file, it needs indexing
+            if not results["ids"] or len(results["ids"]) == 0:
+                logger.debug(f"File {file_path} not found in index, needs indexing")
+                return True
+
+            # Check if stored modification time matches current
+            if results["metadatas"] and len(results["metadatas"]) > 0:
+                stored_mtime = results["metadatas"][0].get("file_mtime")
+                if stored_mtime is None:
+                    # No mtime stored, assume needs reindexing
+                    logger.debug(f"File {file_path} has no stored mtime, needs reindexing")
+                    return True
+
+                # Compare modification times
+                if current_mtime > stored_mtime:
+                    logger.debug(f"File {file_path} has been modified, needs reindexing")
+                    return True
+
+                logger.debug(f"File {file_path} is up to date")
+                return False
+
+            # If we can't determine, assume needs reindexing
+            return True
+
+        except Exception as e:
+            logger.warning(f"Error checking if file needs reindexing {file_path}: {e}, assuming yes")
+            return True

@@ -105,6 +105,8 @@ namespace GameEngine.Components
         # Configure environment
         monkeypatch.setenv("MAG_CODEBASE_ROOT", str(sample_codebase))
         monkeypatch.setenv("MAG_CHROMA_PERSIST_DIR", str(temp_chroma_dir))
+        # Lower similarity threshold for hash-based test embeddings
+        monkeypatch.setenv("MAG_SIMILARITY_THRESHOLD", "0.0")
         from mag.config import reset_settings
 
         reset_settings()

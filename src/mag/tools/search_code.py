@@ -53,10 +53,11 @@ def search_code(
     for i, doc_id in enumerate(results["ids"]):
         metadata = results["metadatas"][i]
         document = results["documents"][i]
-        distance = results["distances"][i]
+        score = results["distances"][i]  # Actually similarity scores from Qdrant query_points
 
-        # Convert distance to relevance score (1 - distance for cosine)
-        relevance_score = 1.0 - distance
+        # Qdrant returns similarity scores (higher = more similar)
+        # No conversion needed - use score directly as relevance
+        relevance_score = score
 
         # Only include results above similarity threshold
         if relevance_score < settings.similarity_threshold:

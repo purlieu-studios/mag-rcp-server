@@ -1,5 +1,6 @@
 """Qdrant vector store wrapper for code embeddings."""
 
+import threading
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
@@ -18,6 +19,9 @@ from mag.config import get_settings
 
 # Namespace UUID for generating deterministic UUIDs from string IDs
 NAMESPACE = UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # Standard namespace UUID
+
+# Global lock for thread-safe database access (SQLite in embedded mode)
+_db_lock = threading.RLock()
 
 
 class VectorStore:
@@ -101,49 +105,51 @@ class VectorStore:
         if not embeddings:
             return
 
-        # Update vector size if needed and recreate collection
-        if embeddings and len(embeddings[0]) != self._vector_size:
-            self._vector_size = len(embeddings[0])
-            # Delete and recreate collection with correct vector size
-            try:
-                self.client.delete_collection(self.collection_name)
-            except Exception:
-                pass  # Collection might not exist yet
-            self._ensure_collection()
-
-        # Create points
-        points = []
-        for i, (embedding, document, metadata, point_id) in enumerate(
-            zip(embeddings, documents, metadatas, ids)
-        ):
-            # Ensure all metadata values are JSON-serializable
-            # Store original ID in metadata for retrieval
-            payload = {**metadata, "document": document, "_original_id": point_id}
-
-            points.append(
-                PointStruct(
-                    id=str(self._to_uuid(point_id)),
-                    vector=embedding,
-                    payload=payload,
-                )
-            )
-
-        # Upsert points - retry once if collection doesn't exist
-        try:
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=points,
-            )
-        except Exception as e:
-            # Collection might have been deleted by another thread, recreate and retry
-            if "not found" in str(e).lower():
+        # Use global lock for thread-safe database access
+        with _db_lock:
+            # Update vector size if needed and recreate collection
+            if embeddings and len(embeddings[0]) != self._vector_size:
+                self._vector_size = len(embeddings[0])
+                # Delete and recreate collection with correct vector size
+                try:
+                    self.client.delete_collection(self.collection_name)
+                except Exception:
+                    pass  # Collection might not exist yet
                 self._ensure_collection()
+
+            # Create points
+            points = []
+            for i, (embedding, document, metadata, point_id) in enumerate(
+                zip(embeddings, documents, metadatas, ids)
+            ):
+                # Ensure all metadata values are JSON-serializable
+                # Store original ID in metadata for retrieval
+                payload = {**metadata, "document": document, "_original_id": point_id}
+
+                points.append(
+                    PointStruct(
+                        id=str(self._to_uuid(point_id)),
+                        vector=embedding,
+                        payload=payload,
+                    )
+                )
+
+            # Upsert points - retry once if collection doesn't exist
+            try:
                 self.client.upsert(
                     collection_name=self.collection_name,
                     points=points,
                 )
-            else:
-                raise
+            except Exception as e:
+                # Collection might have been deleted by another thread, recreate and retry
+                if "not found" in str(e).lower():
+                    self._ensure_collection()
+                    self.client.upsert(
+                        collection_name=self.collection_name,
+                        points=points,
+                    )
+                else:
+                    raise
 
     def search(
         self,
@@ -180,14 +186,16 @@ class VectorStore:
             if must_conditions:
                 query_filter = Filter(must=must_conditions)
 
-        # Search
+        # Search using new query_points API
         try:
-            results = self.client.search(
+            results = self.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_embedding,
+                query=query_embedding,
                 limit=n_results,
                 query_filter=query_filter,
-            )
+                with_payload=True,
+                with_vectors=False,
+            ).points
         except Exception:
             # Collection might not exist or be empty
             return {
@@ -263,57 +271,59 @@ class VectorStore:
         Returns:
             Number of chunks deleted.
         """
-        # Scroll through all points with this file
-        try:
-            # Get all points matching the file
-            scroll_filter = Filter(
-                must=[FieldCondition(key="file", match=MatchValue(value=file_path))]
-            )
+        with _db_lock:
+            # Scroll through all points with this file
+            try:
+                # Get all points matching the file
+                scroll_filter = Filter(
+                    must=[FieldCondition(key="file", match=MatchValue(value=file_path))]
+                )
 
-            points, _ = self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=scroll_filter,
-                limit=10000,  # Large limit to get all
-            )
+                points, _ = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=scroll_filter,
+                    limit=10000,  # Large limit to get all
+                )
 
-            if not points:
+                if not points:
+                    return 0
+
+                # Delete by UUIDs
+                uuids_to_delete = [p.id for p in points]
+                self.client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=uuids_to_delete,
+                )
+
+                return len(uuids_to_delete)
+
+            except Exception:
                 return 0
-
-            # Delete by UUIDs
-            uuids_to_delete = [p.id for p in points]
-            self.client.delete(
-                collection_name=self.collection_name,
-                points_selector=uuids_to_delete,
-            )
-
-            return len(uuids_to_delete)
-
-        except Exception:
-            return 0
 
     def clear(self) -> None:
         """Delete all data from the collection."""
-        try:
-            # Get all point IDs and delete them
-            points, _ = self.client.scroll(
-                collection_name=self.collection_name,
-                limit=100000,  # Large limit to get all points
-            )
-
-            if points:
-                # Delete all points
-                point_ids = [p.id for p in points]
-                self.client.delete(
-                    collection_name=self.collection_name,
-                    points_selector=point_ids,
-                )
-        except Exception:
-            # If collection doesn't exist or other error, try delete and recreate
+        with _db_lock:
             try:
-                self.client.delete_collection(self.collection_name)
+                # Get all point IDs and delete them
+                points, _ = self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=100000,  # Large limit to get all points
+                )
+
+                if points:
+                    # Delete all points
+                    point_ids = [p.id for p in points]
+                    self.client.delete(
+                        collection_name=self.collection_name,
+                        points_selector=point_ids,
+                    )
             except Exception:
-                pass
-            self._ensure_collection()
+                # If collection doesn't exist or other error, try delete and recreate
+                try:
+                    self.client.delete_collection(self.collection_name)
+                except Exception:
+                    pass
+                self._ensure_collection()
 
     def count(self) -> int:
         """
@@ -416,39 +426,40 @@ class VectorStore:
             chunk_id: Chunk ID to update.
             metadata: New metadata dictionary.
         """
-        try:
-            # Get current point
-            uuid_id = str(self._to_uuid(chunk_id))
-            results = self.client.retrieve(
-                collection_name=self.collection_name,
-                ids=[uuid_id],
-                with_vectors=True,  # Need vectors for upsert
-            )
+        with _db_lock:
+            try:
+                # Get current point
+                uuid_id = str(self._to_uuid(chunk_id))
+                results = self.client.retrieve(
+                    collection_name=self.collection_name,
+                    ids=[uuid_id],
+                    with_vectors=True,  # Need vectors for upsert
+                )
 
-            if not results:
-                return
+                if not results:
+                    return
 
-            point = results[0]
-            payload = point.payload or {}
-            document = payload.get("document", "")
+                point = results[0]
+                payload = point.payload or {}
+                document = payload.get("document", "")
 
-            # Update payload, preserve original ID
-            new_payload = {**metadata, "document": document, "_original_id": chunk_id}
+                # Update payload, preserve original ID
+                new_payload = {**metadata, "document": document, "_original_id": chunk_id}
 
-            # Upsert with same vector but new payload
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=[
-                    PointStruct(
-                        id=uuid_id,
-                        vector=point.vector,
-                        payload=new_payload,
-                    )
-                ],
-            )
+                # Upsert with same vector but new payload
+                self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=[
+                        PointStruct(
+                            id=uuid_id,
+                            vector=point.vector,
+                            payload=new_payload,
+                        )
+                    ],
+                )
 
-        except Exception:
-            pass  # Silently fail if update fails
+            except Exception:
+                pass  # Silently fail if update fails
 
     @property
     def collection(self) -> Any:

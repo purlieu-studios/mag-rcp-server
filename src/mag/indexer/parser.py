@@ -244,7 +244,7 @@ class CSharpParser:
         parent: str | None,
     ) -> CodeNode:
         """Extract method or constructor declaration."""
-        name = self._get_node_name(node, source)
+        name = self._get_method_name(node, source)
         docstring = self._extract_docstring(node, source)
 
         return CodeNode(
@@ -325,6 +325,33 @@ class CSharpParser:
         if name_node:
             return self._get_node_text(name_node, source)
         return "<unnamed>"
+
+    def _get_method_name(self, node: object, source: bytes) -> str:
+        """
+        Extract method name from a method declaration node.
+
+        For methods with generic return types (e.g., T GetById(int id)),
+        we need to find the identifier that comes before the parameter_list,
+        not the first identifier (which would be the return type).
+        """
+        # Find the parameter_list to locate the method name just before it
+        param_list_index = -1
+        children = getattr(node, "children", [])
+
+        for i, child in enumerate(children):
+            if getattr(child, "type", None) == "parameter_list":
+                param_list_index = i
+                break
+
+        # Look backwards from parameter_list to find the last identifier
+        if param_list_index > 0:
+            for i in range(param_list_index - 1, -1, -1):
+                child = children[i]
+                if getattr(child, "type", None) == "identifier":
+                    return self._get_node_text(child, source)
+
+        # Fallback to first identifier if we can't find one before parameter_list
+        return self._get_node_name(node, source)
 
     def _find_first_child_of_type(self, node: object, node_type: str) -> object | None:
         """Find the first child node of a specific type."""

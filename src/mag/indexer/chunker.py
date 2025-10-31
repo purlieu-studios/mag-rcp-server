@@ -207,29 +207,45 @@ class SemanticChunker:
         signature_lines = []
         brace_count = 0
         in_method = False
+        prev_line_method_signature = False
 
         for line in lines:
-            # Track braces to detect methods
+            stripped = line.strip()
+
+            # Check if previous line was a method signature (has `(` but no `{`)
+            # and current line is just an opening brace
+            if prev_line_method_signature and stripped == "{":
+                in_method = True
+                prev_line_method_signature = False
+
+            # Check if this looks like a method signature line
+            if (
+                "(" in line
+                and ")" in line
+                and not in_method
+                and brace_count >= 1
+                and any(keyword in line for keyword in ["void ", "int ", "string ", "public ", "private ", "protected ", "bool ", "double ", "float "])
+            ):
+                # Check if opening brace is NOT on this line
+                if "{" not in line:
+                    prev_line_method_signature = True
+                    signature_lines.append(line)
+                    continue
+                else:
+                    # Opening brace is on the same line
+                    in_method = True
+
+            # Track braces
             brace_count += line.count("{") - line.count("}")
 
-            # Check if this looks like a method start
-            if (
-                "{" in line
-                and any(
-                    keyword in line
-                    for keyword in ["void ", "int ", "string ", "public ", "private ", "protected "]
-                )
-                and "(" in line
-            ):
-                in_method = True
-
-            if not in_method or brace_count == 1:
+            # Include line if we're not in a method body, or if we're at class level (brace_count == 1)
+            if not in_method:
                 signature_lines.append(line)
-
-            # Reset when we exit a method
-            if in_method and brace_count == 1 and "}" in line:
+            elif brace_count == 1 and "}" in line:
+                # Exiting a method
                 in_method = False
-                signature_lines.append("    // ... methods omitted ...")
+                signature_lines.append("    // ... method body omitted ...")
+                signature_lines.append(line)
 
         return "\n".join(signature_lines)
 
