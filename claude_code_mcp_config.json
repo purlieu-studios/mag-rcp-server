@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "mag-csharp-rag": {
+      "command": "python",
+      "args": [
+        "-m",
+        "mag.server"
+      ],
+      "env": {
+        "MAG_CODEBASE_ROOT": "C:\\programming\\rag-mcp-server",
+        "MAG_CHROMA_PERSIST_DIR": "C:\\programming\\rag-mcp-server\\data\\chroma",
+        "MAG_OLLAMA_HOST": "http://localhost:11434",
+        "MAG_EMBEDDING_MODEL": "nomic-embed-text",
+        "MAG_LLM_MODEL": "codestral",
+        "MAG_SIMILARITY_THRESHOLD": "0.7",
+        "MAG_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
